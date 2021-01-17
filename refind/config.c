@@ -35,7 +35,7 @@
  */
 
 /*
- * Modifications copyright (c) 2012-2020 Roderick W. Smith
+ * Modifications copyright (c) 2012-2015 Roderick W. Smith
  * 
  * Modifications distributed under the terms of the GNU General Public
  * License (GPL) version 3 (GPLv3) or (at your option) any later version.
@@ -64,7 +64,6 @@
 #include "screen.h"
 #include "apple.h"
 #include "mystrings.h"
-#include "scan.h"
 #include "../include/refit_call_wrapper.h"
 #include "../mok/mok.h"
 
@@ -80,7 +79,7 @@
 #define GetTime ST->RuntimeServices->GetTime
 #define LAST_MINUTE 1439 /* Last minute of a day */
 
-// extern REFIT_MENU_ENTRY MenuEntryReturn;
+extern REFIT_MENU_ENTRY MenuEntryReturn;
 //static REFIT_MENU_ENTRY MenuEntryReturn   = { L"Return to Main Menu", TAG_RETURN, 0, 0, 0, NULL, NULL, NULL };
 
 //
@@ -283,6 +282,10 @@ UINTN ReadTokenLine(IN REFIT_FILE *File, OUT CHAR16 ***TokenList)
         Line = ReadLine(File);
         if (Line == NULL)
             return(0);
+        if (Line[0] == L'\0') {
+            MyFreePool(Line);
+            return(0);
+        } // if
 
         p = Line;
         LineFinished = FALSE;
@@ -336,10 +339,19 @@ static VOID HandleInt(IN CHAR16 **TokenList, IN UINTN TokenCount, OUT UINTN *Val
 
 // handle a parameter with a single string argument
 static VOID HandleString(IN CHAR16 **TokenList, IN UINTN TokenCount, OUT CHAR16 **Target) {
-    if ((TokenCount == 2) && Target) {
-        MyFreePool(*Target);
-        *Target = StrDuplicate(TokenList[1]);
-    } // if
+   if ((TokenCount == 2) && Target) {
+      if ((StrLen(TokenList[1]) > 1) && (TokenList[1][0] == L'+') &&
+          ((TokenList[1][1] == L',') || (TokenList[1][1] == L' '))) {
+         if (*Target) {
+            MergeStrings(Target, TokenList[1] + 2, L',');
+         } else {
+            *Target = StrDuplicate(TokenList[1] + 2);
+         } // if/else
+      } else {
+         MyFreePool(*Target);
+         *Target = StrDuplicate(TokenList[1]);
+      } // if/else
+   } // if
 } // static VOID HandleString()
 
 // Handle a parameter with a series of string arguments, to replace or be added to a
@@ -481,12 +493,6 @@ static VOID SetDefaultByTime(IN CHAR16 **TokenList, OUT CHAR16 **Default) {
    } // if ((StartTime <= LAST_MINUTE) && (EndTime <= LAST_MINUTE))
 } // VOID SetDefaultByTime()
 
-static LOADER_ENTRY * AddPreparedLoaderEntry(LOADER_ENTRY *Entry) {
-    AddMenuEntry(&MainMenu, (REFIT_MENU_ENTRY *)Entry);
-
-    return(Entry);
-} // LOADER_ENTRY * AddPreparedLoaderEntry()
-
 // read config file
 VOID ReadConfig(CHAR16 *FileName)
 {
@@ -496,29 +502,39 @@ VOID ReadConfig(CHAR16 *FileName)
     CHAR16          *FlagName;
     CHAR16          *TempStr = NULL;
     UINTN           TokenCount, i;
+    EFI_GUID        RefindGuid = REFIND_GUID_VALUE;
 
     // Set a few defaults only if we're loading the default file.
     if (MyStriCmp(FileName, GlobalConfig.ConfigFilename)) {
        MyFreePool(GlobalConfig.AlsoScan);
        GlobalConfig.AlsoScan = StrDuplicate(ALSO_SCAN_DIRS);
        MyFreePool(GlobalConfig.DontScanDirs);
-       if (SelfVolume)
-          TempStr = GuidAsString(&(SelfVolume->PartGuid));
+       if (SelfVolume) {
+          if (SelfVolume->VolName) {
+             TempStr = SelfVolume->VolName ? StrDuplicate(SelfVolume->VolName) : NULL;
+          } else {
+             TempStr = AllocateZeroPool(256 * sizeof(CHAR16));
+             if (TempStr != NULL)
+                SPrint(TempStr, 255, L"fs%d", SelfVolume->VolNumber);
+          } // if/else
+       }
        MergeStrings(&TempStr, SelfDirPath, L':');
        MergeStrings(&TempStr, MEMTEST_LOCATIONS, L',');
        GlobalConfig.DontScanDirs = TempStr;
        MyFreePool(GlobalConfig.DontScanFiles);
        GlobalConfig.DontScanFiles = StrDuplicate(DONT_SCAN_FILES);
-       MyFreePool(GlobalConfig.DontScanTools);
-       GlobalConfig.DontScanTools = NULL;
        MergeStrings(&(GlobalConfig.DontScanFiles), MOK_NAMES, L',');
        MergeStrings(&(GlobalConfig.DontScanFiles), FWUPDATE_NAMES, L',');
        MyFreePool(GlobalConfig.DontScanVolumes);
        GlobalConfig.DontScanVolumes = StrDuplicate(DONT_SCAN_VOLUMES);
        GlobalConfig.WindowsRecoveryFiles = StrDuplicate(WINDOWS_RECOVERY_FILES);
-       GlobalConfig.MacOSRecoveryFiles = StrDuplicate(MACOS_RECOVERY_FILES);
-       MyFreePool(GlobalConfig.DefaultSelection);
-       GlobalConfig.DefaultSelection = StrDuplicate(L"+");
+       if (GlobalConfig.DefaultSelection != NULL) {
+          MyFreePool(GlobalConfig.DefaultSelection);
+          GlobalConfig.DefaultSelection = NULL;
+       }
+       Status = EfivarGetRaw(&RefindGuid, L"PreviousBoot", (CHAR8**) &(GlobalConfig.DefaultSelection), &i);
+       if (Status != EFI_SUCCESS)
+          GlobalConfig.DefaultSelection = NULL;
     } // if
 
     if (!FileExists(SelfDir, FileName)) {
@@ -541,9 +557,6 @@ VOID ReadConfig(CHAR16 *FileName)
 
         if (MyStriCmp(TokenList[0], L"timeout")) {
             HandleInt(TokenList, TokenCount, &(GlobalConfig.Timeout));
-
-        } else if (MyStriCmp(TokenList[0], L"shutdown_after_timeout")) {
-           GlobalConfig.ShutdownAfterTimeout = HandleBoolean(TokenList, TokenCount);
 
         } else if (MyStriCmp(TokenList[0], L"hideui")) {
             for (i = 1; i < TokenCount; i++) {
@@ -584,9 +597,6 @@ VOID ReadConfig(CHAR16 *FileName)
                  GlobalConfig.ScanFor[i] = ' ';
            }
 
-        } else if (MyStriCmp(TokenList[0], L"use_nvram")) {
-           GlobalConfig.UseNvram = HandleBoolean(TokenList, TokenCount);
-
         } else if (MyStriCmp(TokenList[0], L"uefi_deep_legacy_scan")) {
            GlobalConfig.DeepLegacyScan = HandleBoolean(TokenList, TokenCount);
 
@@ -610,9 +620,6 @@ VOID ReadConfig(CHAR16 *FileName)
         } else if (MyStriCmp(TokenList[0], L"don't_scan_files") || MyStriCmp(TokenList[0], L"dont_scan_files")) {
            HandleStrings(TokenList, TokenCount, &(GlobalConfig.DontScanFiles));
 
-        } else if (MyStriCmp(TokenList[0], L"don't_scan_tools") || MyStriCmp(TokenList[0], L"dont_scan_tools")) {
-           HandleStrings(TokenList, TokenCount, &(GlobalConfig.DontScanTools));
-
         } else if (MyStriCmp(TokenList[0], L"windows_recovery_files")) {
            HandleStrings(TokenList, TokenCount, &(GlobalConfig.WindowsRecoveryFiles));
 
@@ -621,7 +628,6 @@ VOID ReadConfig(CHAR16 *FileName)
 
         } else if (MyStriCmp(TokenList[0], L"showtools")) {
             SetMem(GlobalConfig.ShowTools, NUM_TOOLS * sizeof(UINTN), 0);
-            GlobalConfig.HiddenTags = FALSE;
             for (i = 1; (i < TokenCount) && (i < NUM_TOOLS); i++) {
                 FlagName = TokenList[i];
                 if (MyStriCmp(FlagName, L"shell")) {
@@ -638,10 +644,6 @@ VOID ReadConfig(CHAR16 *FileName)
                    GlobalConfig.ShowTools[i - 1] = TAG_REBOOT;
                 } else if (MyStriCmp(FlagName, L"shutdown")) {
                    GlobalConfig.ShowTools[i - 1] = TAG_SHUTDOWN;
-                } else if (MyStriCmp(FlagName, L"install")) {
-                   GlobalConfig.ShowTools[i - 1] = TAG_INSTALL;
-                } else if (MyStriCmp(FlagName, L"bootorder")) {
-                   GlobalConfig.ShowTools[i - 1] = TAG_BOOTORDER;
                 } else if (MyStriCmp(FlagName, L"apple_recovery")) {
                    GlobalConfig.ShowTools[i - 1] = TAG_APPLE_RECOVERY;
                 } else if (MyStriCmp(FlagName, L"windows_recovery")) {
@@ -658,9 +660,6 @@ VOID ReadConfig(CHAR16 *FileName)
                    GlobalConfig.ShowTools[i - 1] = TAG_MEMTEST;
                 } else if (MyStriCmp(FlagName, L"netboot")) {
                    GlobalConfig.ShowTools[i - 1] = TAG_NETBOOT;
-                } else if (MyStriCmp(FlagName, L"hidden_tags")) {
-                    GlobalConfig.ShowTools[i - 1] = TAG_HIDDEN;
-                    GlobalConfig.HiddenTags = TRUE;
                 } else {
                    Print(L" unknown showtools flag: '%s'\n", FlagName);
                 }
@@ -680,23 +679,14 @@ VOID ReadConfig(CHAR16 *FileName)
 
         } else if (MyStriCmp(TokenList[0], L"small_icon_size") && (TokenCount == 2)) {
            HandleInt(TokenList, TokenCount, &i);
-           if (i >= 32) {
+           if (i >= 32)
               GlobalConfig.IconSizes[ICON_SIZE_SMALL] = i;
-              HaveResized = TRUE;
-           }
 
         } else if (MyStriCmp(TokenList[0], L"big_icon_size") && (TokenCount == 2)) {
            HandleInt(TokenList, TokenCount, &i);
            if (i >= 32) {
               GlobalConfig.IconSizes[ICON_SIZE_BIG] = i;
               GlobalConfig.IconSizes[ICON_SIZE_BADGE] = i / 4;
-              HaveResized = TRUE;
-           }
-
-        } else if (MyStriCmp(TokenList[0], L"mouse_size") && (TokenCount == 2)) {
-           HandleInt(TokenList, TokenCount, &i);
-           if (i >= DEFAULT_MOUSE_SIZE) {
-              GlobalConfig.IconSizes[ICON_SIZE_MOUSE] = i;
            }
 
         } else if (MyStriCmp(TokenList[0], L"selection_small")) {
@@ -754,9 +744,6 @@ VOID ReadConfig(CHAR16 *FileName)
         } else if (MyStriCmp(TokenList[0], L"fold_linux_kernels")) {
             GlobalConfig.FoldLinuxKernels = HandleBoolean(TokenList, TokenCount);
 
-        } else if (MyStriCmp(TokenList[0], L"extra_kernel_version_strings")) {
-            HandleStrings(TokenList, TokenCount, &(GlobalConfig.ExtraKernelVersionStrings));
-
         } else if (MyStriCmp(TokenList[0], L"max_tags")) {
            HandleInt(TokenList, TokenCount, &(GlobalConfig.MaxTags));
 
@@ -774,25 +761,6 @@ VOID ReadConfig(CHAR16 *FileName)
               ReadConfig(TokenList[1]);
            }
 
-        } else if (MyStriCmp(TokenList[0], L"enable_mouse")) {
-           GlobalConfig.EnableMouse = HandleBoolean(TokenList, TokenCount);
-           if(GlobalConfig.EnableMouse) {
-               GlobalConfig.EnableTouch = FALSE;
-           }
-        
-        } else if (MyStriCmp(TokenList[0], L"enable_touch")) {
-           GlobalConfig.EnableTouch = HandleBoolean(TokenList, TokenCount);
-           if(GlobalConfig.EnableTouch) {
-               GlobalConfig.EnableMouse = FALSE;
-           }
-           
-        } else if (MyStriCmp(TokenList[0], L"mouse_speed") && (TokenCount == 2)) {
-           HandleInt(TokenList, TokenCount, &i);
-           if (i < 1)
-              i = 1;
-           if (i > 32)
-              i = 32;
-           GlobalConfig.MouseSpeed = i;
         }
 
         FreeTokenLine(&TokenList, &TokenCount);
@@ -806,6 +774,50 @@ VOID ReadConfig(CHAR16 *FileName)
        GlobalConfig.TextOnly = TRUE;
     }
 } /* VOID ReadConfig() */
+
+// Finds a volume with the specified Identifier (a filesystem label, a
+// partition name, a partition GUID, or a number followed by a colon). If
+// found, sets *Volume to point to that volume. If not, leaves it unchanged.
+// Returns TRUE if a match was found, FALSE if not.
+static BOOLEAN FindVolume(REFIT_VOLUME **Volume, CHAR16 *Identifier) {
+   UINTN     i = 0, CountedVolumes = 0, Length;
+   INTN      Number = -1;
+   BOOLEAN   Found = FALSE, IdIsGuid = FALSE;
+   EFI_GUID  VolGuid, NullGuid = NULL_GUID_VALUE;
+
+   VolGuid = StringAsGuid(Identifier);
+   Length = StrLen(Identifier);
+   if ((Length >= 2) && (Identifier[Length - 1] == L':') &&
+       (Identifier[0] >= L'0') && (Identifier[0] <= L'9')) {
+      Number = (INTN) Atoi(Identifier);
+   } else if (IsGuid(Identifier)) {
+      IdIsGuid = TRUE;
+   }
+   while ((i < VolumesCount) && (!Found)) {
+      if (Number >= 0) { // User specified a volume by number
+         if (Volumes[i]->IsReadable) {
+            if (CountedVolumes == Number) {
+               *Volume = Volumes[i];
+               Found = TRUE;
+            }
+            CountedVolumes++;
+         } // if
+      } else { // User specified a volume by label or GUID
+         if (MyStriCmp(Identifier, Volumes[i]->VolName) || MyStriCmp(Identifier, Volumes[i]->PartName)) {
+            *Volume = Volumes[i];
+            Found = TRUE;
+         } // if
+         if (IdIsGuid && !Found) {
+            if (GuidsAreEqual(&VolGuid, &(Volumes[i]->PartGuid)) && !GuidsAreEqual(&NullGuid, &(Volumes[i]->PartGuid))) {
+               *Volume = Volumes[i];
+               Found = TRUE;
+            } // if
+         } // if
+      } // if/else
+      i++;
+   } // while()
+   return (Found);
+} // static VOID FindVolume()
 
 static VOID AddSubmenu(LOADER_ENTRY *Entry, REFIT_FILE *File, REFIT_VOLUME *Volume, CHAR16 *Title) {
    REFIT_MENU_SCREEN  *SubScreen;
@@ -827,7 +839,7 @@ static VOID AddSubmenu(LOADER_ENTRY *Entry, REFIT_FILE *File, REFIT_VOLUME *Volu
       if (MyStriCmp(TokenList[0], L"loader") && (TokenCount > 1)) { // set the boot loader filename
          MyFreePool(SubEntry->LoaderPath);
          SubEntry->LoaderPath = StrDuplicate(TokenList[1]);
-         SubEntry->Volume = Volume;
+         SubEntry->DevicePath = FileDevicePath(Volume->DeviceHandle, SubEntry->LoaderPath);
 
       } else if (MyStriCmp(TokenList[0], L"volume") && (TokenCount > 1)) {
          if (FindVolume(&Volume, TokenList[1])) {
@@ -836,7 +848,7 @@ static VOID AddSubmenu(LOADER_ENTRY *Entry, REFIT_FILE *File, REFIT_VOLUME *Volu
                SubEntry->me.Title        = AllocateZeroPool(256 * sizeof(CHAR16));
                SPrint(SubEntry->me.Title, 255, L"Boot %s from %s", (Title != NULL) ? Title : L"Unknown", Volume->VolName);
                SubEntry->me.BadgeImage   = Volume->VolBadgeImage;
-               SubEntry->Volume          = Volume;
+               SubEntry->VolName         = Volume->VolName;
             } // if volume is readable
          } // if match found
 
@@ -899,14 +911,14 @@ static LOADER_ENTRY * AddStanzaEntries(REFIT_FILE *File, REFIT_VOLUME *Volume, C
    SPrint(Entry->me.Title, 255, L"Boot %s from %s", (Title != NULL) ? Title : L"Unknown", CurrentVolume->VolName);
    Entry->me.Row          = 0;
    Entry->me.BadgeImage   = CurrentVolume->VolBadgeImage;
-   Entry->Volume          = CurrentVolume;
-   Entry->DiscoveryType   = DISCOVERY_TYPE_MANUAL;
+   Entry->VolName         = CurrentVolume->VolName;
 
    // Parse the config file to add options for a single stanza, terminating when the token
    // is "}" or when the end of file is reached.
    while (((TokenCount = ReadTokenLine(File, &TokenList)) > 0) && (StrCmp(TokenList[0], L"}") != 0)) {
       if (MyStriCmp(TokenList[0], L"loader") && (TokenCount > 1)) { // set the boot loader filename
          Entry->LoaderPath = StrDuplicate(TokenList[1]);
+         Entry->DevicePath = FileDevicePath(CurrentVolume->DeviceHandle, Entry->LoaderPath);
          SetLoaderDefaults(Entry, TokenList[1], CurrentVolume);
          MyFreePool(Entry->LoadOptions);
          Entry->LoadOptions = NULL; // Discard default options, if any
@@ -919,7 +931,7 @@ static LOADER_ENTRY * AddStanzaEntries(REFIT_FILE *File, REFIT_VOLUME *Volume, C
                Entry->me.Title        = AllocateZeroPool(256 * sizeof(CHAR16));
                SPrint(Entry->me.Title, 255, L"Boot %s from %s", (Title != NULL) ? Title : L"Unknown", CurrentVolume->VolName);
                Entry->me.BadgeImage   = CurrentVolume->VolBadgeImage;
-               Entry->Volume          = CurrentVolume;
+               Entry->VolName         = CurrentVolume->VolName;
             } // if volume is readable
          } // if match found
 
@@ -981,6 +993,7 @@ VOID ScanUserConfigured(CHAR16 *FileName)
    REFIT_FILE        File;
    REFIT_VOLUME      *Volume;
    CHAR16            **TokenList;
+   CHAR16            *Title = NULL;
    UINTN             TokenCount, size;
    LOADER_ENTRY      *Entry;
 
@@ -993,6 +1006,7 @@ VOID ScanUserConfigured(CHAR16 *FileName)
 
       while ((TokenCount = ReadTokenLine(&File, &TokenList)) > 0) {
          if (MyStriCmp(TokenList[0], L"menuentry") && (TokenCount > 1)) {
+            Title = StrDuplicate(TokenList[1]);
             Entry = AddStanzaEntries(&File, Volume, TokenList[1]);
             if (Entry->Enabled) {
                if (Entry->me.SubScreen == NULL)
@@ -1001,6 +1015,7 @@ VOID ScanUserConfigured(CHAR16 *FileName)
             } else {
                MyFreePool(Entry);
             } // if/else
+            MyFreePool(Title);
 
          } else if (MyStriCmp(TokenList[0], L"include") && (TokenCount == 2) &&
                     MyStriCmp(FileName, GlobalConfig.ConfigFilename)) {
@@ -1054,7 +1069,6 @@ static REFIT_FILE * GenerateOptionsFromEtcFstab(REFIT_VOLUME *Volume) {
                   MyFreePool(Line);
                   Line = PoolPrint(L"\"Boot into single-user mode\"  \"ro root=%s single\"\n", Root);
                   MergeStrings((CHAR16**) &(Options->Buffer), Line, 0);
-                  MyFreePool(Line);
                   Options->BufferSize = StrLen((CHAR16*) Options->Buffer) * sizeof(CHAR16);
                } // if
             } // if
@@ -1123,9 +1137,14 @@ static REFIT_FILE * GenerateOptionsFromPartTypes(VOID) {
 // you pass this function the filename of the Linux kernel, initial RAM disk, or other
 // file in the target directory, and this function finds the file with a name in the
 // comma-delimited list of names specified by LINUX_OPTIONS_FILENAMES within that
-// directory and loads it. If a rEFInd options file can't be found, try to generate
-// minimal options from /etc/fstab on the same volume as the kernel. This typically
-// works only if the kernel is being read from the Linux root filesystem.
+// directory and loads it. This function tries multiple files because I originally
+// used the filename linux.conf, but close on the heels of that decision, the Linux
+// kernel developers decided to use that name for a similar purpose, but with a
+// different file format. Thus, I'm migrating rEFInd to use the name refind_linux.conf,
+// but I want a migration period in which both names are used.
+// If a rEFInd options file can't be found, try to generate minimal options from
+// /etc/fstab on the same volume as the kernel. This typically works only if the
+// kernel is being read from the Linux root filesystem.
 //
 // The return value is a pointer to the REFIT_FILE handle for the file, or NULL if
 // it wasn't found.

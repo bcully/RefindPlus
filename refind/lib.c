@@ -34,7 +34,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 /*
- * Modifications copyright (c) 2012-2020 Roderick W. Smith
+ * Modifications copyright (c) 2012-2015 Roderick W. Smith
  *
  * Modifications distributed under the terms of the GNU General Public
  * License (GPL) version 3 (GPLv3), or (at your option) any later version.
@@ -89,20 +89,6 @@ EFI_DEVICE_PATH EndDevicePath[] = {
 #define BTRFS_SIGNATURE                  "_BHRfS_M"
 #define XFS_SIGNATURE                    "XFSB"
 #define NTFS_SIGNATURE                   "NTFS    "
-#define FAT12_SIGNATURE                  "FAT12   "
-#define FAT16_SIGNATURE                  "FAT16   "
-#define FAT32_SIGNATURE                  "FAT32   "
-
-#if defined (EFIX64)
-EFI_GUID gFreedesktopRootGuid = { 0x4f68bce3, 0xe8cd, 0x4db1, { 0x96, 0xe7, 0xfb, 0xca, 0xf9, 0x84, 0xb7, 0x09 }};
-#elif defined (EFI32)
-EFI_GUID gFreedesktopRootGuid = { 0x44479540, 0xf297, 0x41b2, { 0x9a, 0xf7, 0xd1, 0x31, 0xd5, 0xf0, 0x45, 0x8a }};
-#elif defined (EFIAARCH64)
-EFI_GUID gFreedesktopRootGuid = { 0xb921b045, 0x1df0, 0x41c3, { 0xaf, 0x44, 0x4c, 0x6f, 0x28, 0x0d, 0x3f, 0xae }};
-#else
-// Below is GUID for ARM32
-EFI_GUID gFreedesktopRootGuid = { 0x69dad710, 0x2ce4, 0x4e3c, { 0xb1, 0x6c, 0x21, 0xa1, 0xd4, 0x9a, 0xbe, 0xd3 }};
-#endif
 
 // variables
 
@@ -115,7 +101,7 @@ CHAR16           *SelfDirPath;
 REFIT_VOLUME     *SelfVolume = NULL;
 REFIT_VOLUME     **Volumes = NULL;
 UINTN            VolumesCount = 0;
-extern EFI_GUID RefindGuid;
+extern GPT_DATA *gPartitions;
 
 // Maximum size for disk sectors
 #define SECTOR_SIZE 4096
@@ -134,38 +120,37 @@ extern EFI_GUID RefindGuid;
 // in pathnames, because some user inputs can produce duplicate directory
 // separators, and because we want consistent start and end slashes for
 // directory comparisons. A special case: If the PathName refers to root,
-// but is non-empty, return "\", since some firmware implementations flake
-// out if this isn't present.
+// return "/", since some firmware implementations flake out if this
+// isn't present.
 VOID CleanUpPathNameSlashes(IN OUT CHAR16 *PathName) {
-    UINTN Source = 0, Dest = 0;
+    CHAR16   *NewName;
+    UINTN    i, Length, FinalChar = 0;
+    BOOLEAN  LastWasSlash = FALSE;
 
-    if ((PathName == NULL) || (PathName[0] == '\0'))
-        return;
-
-    while (PathName[Source] != '\0') {
-        if ((PathName[Source] == L'/') || (PathName[Source] == L'\\')) {
-            if (Dest == 0) { // Skip slash if to first position
-                Source++;
+    Length = StrLen(PathName);
+    NewName = AllocateZeroPool(sizeof(CHAR16) * (Length + 2));
+    if (NewName != NULL) {
+        for (i = 0; i < Length; i++) {
+            if ((PathName[i] == L'/') || (PathName[i] == L'\\')) {
+                if ((!LastWasSlash) && (FinalChar != 0))
+                    NewName[FinalChar++] = L'\\';
+                LastWasSlash = TRUE;
             } else {
-                PathName[Dest] = L'\\';
-                do { // Skip subsequent slashes
-                    Source++;
-                } while ((PathName[Source] == L'/') || (PathName[Source] == L'\\'));
-                Dest++;
+                NewName[FinalChar++] = PathName[i];
+                LastWasSlash = FALSE;
             } // if/else
-        } else { // Regular character; copy it straight....
-            PathName[Dest] = PathName[Source];
-            Source++;
-            Dest++;
-        } // if/else
-    } // while()
-    if ((Dest > 0) && (PathName[Dest - 1] == L'\\'))
-        Dest--;
-    PathName[Dest] = L'\0';
-    if (PathName[0] == L'\0') {
-        PathName[0] = L'\\';
-        PathName[1] = L'\0';
-    }
+        } // for
+        NewName[FinalChar] = 0;
+        if ((FinalChar > 0) && (NewName[FinalChar - 1] == L'\\'))
+            NewName[--FinalChar] = 0;
+        if (FinalChar == 0) {
+            NewName[0] = L'\\';
+            NewName[1] = 0;
+        }
+        // Copy the transformed name back....
+        StrCpy(PathName, NewName);
+        FreePool(NewName);
+    } // if allocation OK
 } // CleanUpPathNameSlashes()
 
 // Splits an EFI device path into device and filename components. For instance, if InString is
@@ -178,7 +163,7 @@ VOID CleanUpPathNameSlashes(IN OUT CHAR16 *PathName) {
 // input value.
 // If InString contains no ")" character, this function leaves the original input string
 // unmodified and also returns that string. If InString is NULL, this function returns NULL.
-CHAR16* SplitDeviceString(IN OUT CHAR16 *InString) {
+static CHAR16* SplitDeviceString(IN OUT CHAR16 *InString) {
     INTN i;
     CHAR16 *FileName = NULL;
     BOOLEAN Found = FALSE;
@@ -226,7 +211,7 @@ static EFI_STATUS FinishInitRefitLib(VOID)
 EFI_STATUS InitRefitLib(IN EFI_HANDLE ImageHandle)
 {
     EFI_STATUS  Status;
-    CHAR16      *DevicePathAsString, *Temp = NULL;
+    CHAR16      *DevicePathAsString, *Temp;
 
     SelfImageHandle = ImageHandle;
     Status = refit_call3_wrapper(BS->HandleProtocol, SelfImageHandle, &LoadedImageProtocol, (VOID **) &SelfLoadedImage);
@@ -361,66 +346,37 @@ EFI_STATUS ReinitRefitLib(VOID)
 // EFI variable read and write functions
 //
 
-// Retrieve a raw EFI variable, either from NVRAM or from a disk file under
-// rEFInd's "vars" subdirectory, depending on GlobalConfig.UseNvram.
+// From gummiboot: Retrieve a raw EFI variable.
 // Returns EFI status
 EFI_STATUS EfivarGetRaw(EFI_GUID *vendor, CHAR16 *name, CHAR8 **buffer, UINTN *size) {
-    UINT8 *buf = NULL;
-    UINTN l;
-    EFI_STATUS Status;
-    EFI_FILE *VarsDir = NULL;
-    BOOLEAN ReadFromNvram = TRUE;
+   CHAR8 *buf;
+   UINTN l;
+   EFI_STATUS err;
 
-    if ((GlobalConfig.UseNvram == FALSE) && GuidsAreEqual(vendor, &RefindGuid)) {
-        Status = refit_call5_wrapper(SelfDir->Open, SelfDir, &VarsDir, L"vars",
-                                  EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, EFI_FILE_DIRECTORY);
-        if (Status == EFI_SUCCESS)
-            Status = egLoadFile(VarsDir, name, &buf, size);
-        ReadFromNvram = FALSE;
-        MyFreePool(VarsDir);
-    } else {
-        l = sizeof(CHAR16 *) * EFI_MAXIMUM_VARIABLE_SIZE;
-        buf = AllocatePool(l);
-        if (!buf) {
-            *buffer = NULL;
-            return EFI_OUT_OF_RESOURCES;
-        }
-        Status = refit_call5_wrapper(RT->GetVariable, name, vendor, NULL, &l, buf);
-    }
-    if (EFI_ERROR(Status) == EFI_SUCCESS) {
-        *buffer = (CHAR8*) buf;
-        if ((size) && ReadFromNvram)
-            *size = l;
-    } else {
-        MyFreePool(buf);
-        *buffer = NULL;
-    }
-    return Status;
+   l = sizeof(CHAR16 *) * EFI_MAXIMUM_VARIABLE_SIZE;
+   buf = AllocatePool(l);
+   if (!buf)
+      return EFI_OUT_OF_RESOURCES;
+
+   err = refit_call5_wrapper(RT->GetVariable, name, vendor, NULL, &l, buf);
+   if (EFI_ERROR(err) == EFI_SUCCESS) {
+      *buffer = buf;
+      if (size)
+         *size = l;
+   } else
+      MyFreePool(buf);
+   return err;
 } // EFI_STATUS EfivarGetRaw()
 
-// Set an EFI variable, either to NVRAM or to a disk file under rEFInd's
-// "vars" subdirectory, depending on GlobalConfig.UseNvram.
-// Returns EFI status
+// From gummiboot: Set an EFI variable
 EFI_STATUS EfivarSetRaw(EFI_GUID *vendor, CHAR16 *name, CHAR8 *buf, UINTN size, BOOLEAN persistent) {
-    UINT32 flags;
-    EFI_FILE *VarsDir = NULL;
-    EFI_STATUS Status;
+   UINT32 flags;
 
-    if ((GlobalConfig.UseNvram == FALSE) && GuidsAreEqual(vendor, &RefindGuid)) {
-        Status = refit_call5_wrapper(SelfDir->Open, SelfDir, &VarsDir, L"vars",
-                                 EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, EFI_FILE_DIRECTORY);
-        if (Status == EFI_SUCCESS) {
-            Status = egSaveFile(VarsDir, name, (UINT8 *) buf, size);
-        }
-        MyFreePool(VarsDir);
-    } else {
-        flags = EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS;
-        if (persistent)
-            flags |= EFI_VARIABLE_NON_VOLATILE;
+   flags = EFI_VARIABLE_BOOTSERVICE_ACCESS|EFI_VARIABLE_RUNTIME_ACCESS;
+   if (persistent)
+      flags |= EFI_VARIABLE_NON_VOLATILE;
 
-        Status = refit_call5_wrapper(RT->SetVariable, name, vendor, flags, size, buf);
-    }
-    return Status;
+   return refit_call5_wrapper(RT->SetVariable, name, vendor, flags, size, buf);
 } // EFI_STATUS EfivarSetRaw()
 
 //
@@ -511,16 +467,17 @@ static CHAR16 *FSTypeName(IN UINT32 TypeCode) {
 // 4096) bytes of the filesystem. Sets the filesystem type code in Volume->FSType
 // and the UUID/serial number in Volume->VolUuid. Note that the UUID value is
 // recognized differently for each filesystem, and is currently supported only
-// for NTFS, FAT, ext2/3/4fs, and ReiserFS (and for NTFS and FAT it's really a
-// 64-bit or 32-bit serial number not a UUID or GUID). If the UUID can't be
-// determined, it's set to 0. Also, the UUID is just read directly into memory;
-// it is *NOT* valid when displayed by GuidAsString() or used in other
-// GUID/UUID-manipulating functions. (As I write, it's being used merely to
-// detect partitions that are part of a RAID 1 array.)
+// for NTFS, ext2/3/4fs, and ReiserFS (and for NTFS it's really a 64-bit serial
+// number not a UUID or GUID). If the UUID can't be determined, it's set to 0.
+// Also, the UUID is just read directly into memory; it is *NOT* valid when
+// displayed by GuidAsString() or used in other GUID/UUID-manipulating
+// functions. (As I write, it's being used merely to detect partitions that are
+// part of a RAID 1 array.)
 static VOID SetFilesystemData(IN UINT8 *Buffer, IN UINTN BufferSize, IN OUT REFIT_VOLUME *Volume) {
    UINT32       *Ext2Incompat, *Ext2Compat;
    UINT16       *Magic16;
    char         *MagicString;
+   EFI_FILE     *RootDir;
 
    if ((Buffer != NULL) && (Volume != NULL)) {
       SetMem(&(Volume->VolUuid), sizeof(EFI_GUID), 0);
@@ -538,7 +495,7 @@ static VOID SetFilesystemData(IN UINT8 *Buffer, IN UINTN BufferSize, IN OUT REFI
             } else { // none of these features; presume it's ext2...
                Volume->FSType = FS_TYPE_EXT2;
             }
-            CopyMem(&(Volume->VolUuid), Buffer + 1024 + 120, sizeof(EFI_GUID));
+            CopyMem(&(Volume->VolUuid), Buffer + 1024 + 104, sizeof(EFI_GUID));
             return;
          }
       } // search for ext2/3/4 magic
@@ -580,24 +537,24 @@ static VOID SetFilesystemData(IN UINT8 *Buffer, IN UINTN BufferSize, IN OUT REFI
 
       if (BufferSize >= 512) {
          // Search for NTFS, FAT, and MBR/EBR.
-         // These all have 0xAA55 at the end of the first sector, so we must
-         // also search for NTFS, FAT12, FAT16, and FAT32 signatures to
-         // figure out where to look for the filesystem serial numbers.
+         // These all have 0xAA55 at the end of the first sector, but FAT and
+         // MBR/EBR are not easily distinguished. Thus, we first look for NTFS
+         // "magic"; then check to see if the volume can be mounted, thus
+         // relying on the EFI's built-in FAT driver to identify FAT; and then
+         // check to see if the "volume" is in fact a whole-disk device.
          Magic16 = (UINT16*) (Buffer + 510);
          if (*Magic16 == FAT_MAGIC) {
-            MagicString = (char*) Buffer;
-            if (CompareMem(MagicString + 3, NTFS_SIGNATURE, 8) == 0) {
+            MagicString = (char*) (Buffer + 3);
+            if (CompareMem(MagicString, NTFS_SIGNATURE, 8) == 0) {
                Volume->FSType = FS_TYPE_NTFS;
                CopyMem(&(Volume->VolUuid), Buffer + 0x48, sizeof(UINT64));
-            } else if ((CompareMem(MagicString + 0x36, FAT12_SIGNATURE, 8) == 0) ||
-                       (CompareMem(MagicString + 0x36, FAT16_SIGNATURE, 8) == 0)) {
-                Volume->FSType = FS_TYPE_FAT;
-                CopyMem(&(Volume->VolUuid), Buffer + 0x27, sizeof(UINT32));
-            } else if (CompareMem(MagicString + 0x52, FAT32_SIGNATURE, 8) == 0) {
-                Volume->FSType = FS_TYPE_FAT;
-                CopyMem(&(Volume->VolUuid), Buffer + 0x43, sizeof(UINT32));
-            } else if (!Volume->BlockIO->Media->LogicalPartition) {
-                Volume->FSType = FS_TYPE_WHOLEDISK;
+            } else {
+               RootDir = LibOpenRoot(Volume->DeviceHandle);
+               if (RootDir != NULL) {
+                  Volume->FSType = FS_TYPE_FAT;
+               } else if (!Volume->BlockIO->Media->LogicalPartition) {
+                  Volume->FSType = FS_TYPE_WHOLEDISK;
+               } // if/elseif/else
             } // if/else
             return;
          } // if
@@ -774,9 +731,6 @@ static VOID ScanVolumeBootcode(REFIT_VOLUME *Volume, BOOLEAN *Bootable)
 // Set default volume badge icon based on /.VolumeBadge.{icns|png} file or disk kind
 VOID SetVolumeBadgeIcon(REFIT_VOLUME *Volume)
 {
-   if (Volume == NULL)
-       return;
-
    if (GlobalConfig.HideUIFlags & HIDEUI_FLAG_BADGES)
       return;
 
@@ -807,7 +761,7 @@ VOID SetVolumeBadgeIcon(REFIT_VOLUME *Volume)
 static CHAR16 *SizeInIEEEUnits(UINT64 SizeInBytes) {
     UINT64 SizeInIeee;
     UINTN Index = 0, NumPrefixes;
-    CHAR16 *Units = NULL, *Prefixes = L" KMGTPEZ";
+    CHAR16 *Units, *Prefixes = L" KMGTPEZ";
     CHAR16 *TheValue;
 
     TheValue = AllocateZeroPool(sizeof(CHAR16) * 256);
@@ -826,7 +780,6 @@ static CHAR16 *SizeInIEEEUnits(UINT64 SizeInBytes) {
         } // if/else
         SPrint(TheValue, 255, L"%ld%s", SizeInIeee, Units);
     } // if
-    MyFreePool(Units);
     return TheValue;
 } // CHAR16 *SizeInIEEEUnits()
 
@@ -911,14 +864,8 @@ static VOID SetPartGuidAndName(REFIT_VOLUME *Volume, EFI_DEVICE_PATH_PROTOCOL *D
                     GlobalConfig.DiscoveredRoot = Volume;
                 } // if (GUIDs match && automounting OK)
                 Volume->IsMarkedReadOnly = ((PartInfo->attributes & GPT_READ_ONLY) > 0);
-                MyFreePool(PartInfo);
             } // if (PartInfo exists)
-        } else {
-            // TODO: Better to assign a random GUID to MBR partitions, but I couldn't
-            // find an EFI function to do this. The below GUID is just one that I
-            // generated in Linux.
-            Volume->PartGuid = StringAsGuid(L"92a6c61f-7130-49b9-b05c-8d7e7b039127");
-        } // if/else (GPT disk)
+        } // if (GPT disk)
     } // if (disk device)
 } // VOID SetPartGuid()
 
@@ -993,11 +940,11 @@ VOID ScanVolume(REFIT_VOLUME *Volume)
             Bootable = TRUE;
         }
 
-//         if (DevicePathType(DevicePath) == MEDIA_DEVICE_PATH && DevicePathSubType(DevicePath) == MEDIA_VENDOR_DP) {
-//             Volume->IsAppleLegacy = TRUE;             // legacy BIOS device entry
-//             // TODO: also check for Boot Camp GUID
-//             Bootable = FALSE;   // this handle's BlockIO is just an alias for the whole device
-//         }
+        if (DevicePathType(DevicePath) == MEDIA_DEVICE_PATH && DevicePathSubType(DevicePath) == MEDIA_VENDOR_DP) {
+            Volume->IsAppleLegacy = TRUE;             // legacy BIOS device entry
+            // TODO: also check for Boot Camp GUID
+            Bootable = FALSE;   // this handle's BlockIO is just an alias for the whole device
+        }
 
         if (DevicePathType(DevicePath) == MESSAGING_DEVICE_PATH) {
             // make a device path for the whole device
@@ -1009,7 +956,7 @@ VOID ScanVolume(REFIT_VOLUME *Volume)
             // get the handle for that path
             RemainingDevicePath = DiskDevicePath;
             Status = refit_call3_wrapper(BS->LocateDevicePath, &BlockIoProtocol, &RemainingDevicePath, &WholeDiskHandle);
-            MyFreePool(DiskDevicePath);
+            FreePool(DiskDevicePath);
 
             if (!EFI_ERROR(Status)) {
                 //Print(L"  - original handle: %08x - disk handle: %08x\n", (UINT32)DeviceHandle, (UINT32)WholeDiskHandle);
@@ -1135,7 +1082,7 @@ VOID ScanVolumes(VOID)
     UINTN                   HandleIndex;
     UINTN                   VolumeIndex, VolumeIndex2;
     UINTN                   PartitionIndex;
-    UINTN                   SectorSum, i;
+    UINTN                   SectorSum, i, VolNumber = 0;
     UINT8                   *SectorBuffer1, *SectorBuffer2;
     EFI_GUID                *UuidList;
     EFI_GUID                NullUuid = NULL_GUID_VALUE;
@@ -1169,13 +1116,16 @@ VOID ScanVolumes(VOID)
               } // if
            } // for
         } // if
+        if (Volume->IsReadable)
+           Volume->VolNumber = VolNumber++;
+        else
+           Volume->VolNumber = VOL_UNREADABLE;
 
         AddListElement((VOID ***) &Volumes, &VolumesCount, Volume);
 
         if (Volume->DeviceHandle == SelfLoadedImage->DeviceHandle)
             SelfVolume = Volume;
     }
-    MyFreePool(UuidList);
     MyFreePool(Handles);
 
     if (SelfVolume == NULL)
@@ -1441,7 +1391,6 @@ BOOLEAN DirIterNext(IN OUT REFIT_DIR_ITER *DirIter, IN UINTN FilterMode, IN CHAR
             while (KeepGoing && (OnePattern = FindCommaDelimited(FilePattern, i++)) != NULL) {
                if (MetaiMatch(DirIter->LastFileInfo->FileName, OnePattern))
                    KeepGoing = FALSE;
-               MyFreePool(OnePattern);
             } // while
             // else continue loop
         } else
@@ -1458,7 +1407,7 @@ EFI_STATUS DirIterClose(IN OUT REFIT_DIR_ITER *DirIter)
       FreePool(DirIter->LastFileInfo);
       DirIter->LastFileInfo = NULL;
    }
-   if ((DirIter->CloseDirHandle) && (DirIter->DirHandle->Close))
+   if (DirIter->CloseDirHandle)
       refit_call1_wrapper(DirIter->DirHandle->Close, DirIter->DirHandle);
    return DirIter->LastStatus;
 }
@@ -1614,9 +1563,6 @@ VOID FindVolumeAndFilename(IN EFI_DEVICE_PATH *loadpath, OUT REFIT_VOLUME **Devi
     UINTN i = 0;
     BOOLEAN Found = FALSE;
 
-    if (!loadpath || !DeviceVolume || !loader)
-        return;
-
     MyFreePool(*loader);
     MyFreePool(*DeviceVolume);
     *DeviceVolume = NULL;
@@ -1624,13 +1570,9 @@ VOID FindVolumeAndFilename(IN EFI_DEVICE_PATH *loadpath, OUT REFIT_VOLUME **Devi
     *loader = SplitDeviceString(DeviceString);
 
     while ((i < VolumesCount) && (!Found)) {
-        if (Volumes[i]->DevicePath == NULL) {
-            i++;
-            continue;
-        }
         VolumeDeviceString = DevicePathToStr(Volumes[i]->DevicePath);
         Temp = SplitDeviceString(VolumeDeviceString);
-        if (MyStrStr(VolumeDeviceString, DeviceString)) {
+        if (MyStriCmp(DeviceString, VolumeDeviceString)) {
             Found = TRUE;
             *DeviceVolume = Volumes[i];
         }
@@ -1705,39 +1647,6 @@ VOID SplitPathName(CHAR16 *InPath, CHAR16 **VolName, CHAR16 **Path, CHAR16 **Fil
     MyFreePool(Temp);
 } // VOID SplitPathName()
 
-// Finds a volume with the specified Identifier (a filesystem label, a
-// partition name, or a partition GUID). If found, sets *Volume to point
-// to that volume. If not, leaves it unchanged.
-// Returns TRUE if a match was found, FALSE if not.
-BOOLEAN FindVolume(REFIT_VOLUME **Volume, CHAR16 *Identifier) {
-    UINTN     i = 0;
-    BOOLEAN   Found = FALSE;
-
-    while ((i < VolumesCount) && (!Found)) {
-        if (VolumeMatchesDescription(Volumes[i], Identifier)) {
-            *Volume = Volumes[i];
-            Found = TRUE;
-        } // if
-        i++;
-    } // while()
-    return (Found);
-} // static VOID FindVolume()
-
-// Returns TRUE if Description matches Volume's VolName, PartName, or (once
-// transformed) PartGuid fields, FALSE otherwise (or if either pointer is NULL)
-BOOLEAN VolumeMatchesDescription(REFIT_VOLUME *Volume, CHAR16 *Description) {
-    EFI_GUID TargetVolGuid = NULL_GUID_VALUE;
-
-    if ((Volume == NULL) || (Description == NULL))
-        return FALSE;
-    if (IsGuid(Description)) {
-        TargetVolGuid = StringAsGuid(Description);
-        return GuidsAreEqual(&TargetVolGuid, &(Volume->PartGuid));
-    } else {
-        return (MyStriCmp(Description, Volume->VolName) || MyStriCmp(Description, Volume->PartName));
-    }
-} // BOOLEAN VolumeMatchesDescription()
-
 // Returns TRUE if specified Volume, Directory, and Filename correspond to an
 // element in the comma-delimited List, FALSE otherwise. Note that Directory and
 // Filename must *NOT* include a volume or path specification (that's part of
@@ -1753,20 +1662,43 @@ BOOLEAN FilenameIn(REFIT_VOLUME *Volume, CHAR16 *Directory, CHAR16 *Filename, CH
         while (!Found && (OneElement = FindCommaDelimited(List, i++))) {
             Found = TRUE;
             SplitPathName(OneElement, &TargetVolName, &TargetPath, &TargetFilename);
-            if (((TargetVolName != NULL) && (!VolumeMatchesDescription(Volume, TargetVolName))) ||
+            VolumeNumberToName(Volume, &TargetVolName);
+            if (((TargetVolName != NULL) && ((Volume == NULL) || (!MyStriCmp(TargetVolName, Volume->VolName)))) ||
                  ((TargetPath != NULL) && (!MyStriCmp(TargetPath, Directory))) ||
                  ((TargetFilename != NULL) && (!MyStriCmp(TargetFilename, Filename)))) {
                 Found = FALSE;
             } // if
             MyFreePool(OneElement);
         } // while
-        MyFreePool(TargetVolName);
-        MyFreePool(TargetPath);
-        MyFreePool(TargetFilename);
     } // if
 
+    MyFreePool(TargetVolName);
+    MyFreePool(TargetPath);
+    MyFreePool(TargetFilename);
     return Found;
 } // BOOLEAN FilenameIn()
+
+// If *VolName is of the form "fs#", where "#" is a number, and if Volume points
+// to this volume number, returns with *VolName changed to the volume name, as
+// stored in the Volume data structure.
+// Returns TRUE if this substitution was made, FALSE otherwise.
+BOOLEAN VolumeNumberToName(REFIT_VOLUME *Volume, CHAR16 **VolName) {
+   BOOLEAN MadeSubstitution = FALSE;
+   UINTN VolNum;
+
+   if ((VolName == NULL) || (*VolName == NULL))
+      return FALSE;
+
+   if ((StrLen(*VolName) > 2) && (*VolName[0] == L'f') && (*VolName[1] == L's') && (*VolName[2] >= L'0') && (*VolName[2] <= L'9')) {
+      VolNum = Atoi(*VolName + 2);
+      if (VolNum == Volume->VolNumber) {
+         MyFreePool(*VolName);
+         *VolName = StrDuplicate(Volume->VolName);
+         MadeSubstitution = TRUE;
+      } // if
+   } // if
+   return MadeSubstitution;
+} // BOOLEAN VolumeMatchesNumber()
 
 // Implement FreePool the way it should have been done to begin with, so that
 // it doesn't throw an ASSERT message if fed a NULL pointer....

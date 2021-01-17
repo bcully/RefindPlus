@@ -25,7 +25,7 @@
 #include "screen.h"
 #include "apple.h"
 #include "mystrings.h"
-#include "../include/refit_call_wrapper.h"
+#include "refit_call_wrapper.h"
 
 CHAR16 gCsrStatus[256];
 
@@ -61,7 +61,12 @@ EFI_STATUS GetCsrStatus(UINT32 *CsrStatus) {
 // on the Info page. If DisplayMessage is TRUE, displays the new value of
 // gCsrStatus on the screen for three seconds.
 VOID RecordgCsrStatus(UINT32 CsrStatus, BOOLEAN DisplayMessage) {
-    EG_PIXEL    BGColor = COLOR_LIGHTBLUE;
+    EG_PIXEL    BGColor;
+
+    BGColor.b = 255;
+    BGColor.g = 175;
+    BGColor.r = 100;
+    BGColor.a = 0;
 
     switch (CsrStatus) {
         case SIP_ENABLED:
@@ -74,7 +79,7 @@ VOID RecordgCsrStatus(UINT32 CsrStatus, BOOLEAN DisplayMessage) {
             SPrint(gCsrStatus, 255, L" System Integrity Protection status: 0x%02x", CsrStatus);
     } // switch
     if (DisplayMessage) {
-        egDisplayMessage(gCsrStatus, &BGColor, CENTER);
+        egDisplayMessage(gCsrStatus, &BGColor);
         PauseSeconds(3);
     } // if
 } // VOID RecordgCsrStatus()
@@ -156,7 +161,7 @@ EFI_STATUS SetAppleOSInfo() {
                 Status = EFI_OUT_OF_RESOURCES;
                 Print(L"Out of resources in SetAppleOSInfo!\n");
             }
-            if ((Status == EFI_SUCCESS) && (SetOs->Version >= 2))
+            if ((Status == EFI_SUCCESS) && (SetOs->Version == 2))
                 Status = refit_call1_wrapper (SetOs->SetOsVendor, (CHAR8 *) "Apple Inc.");
             MyFreePool(AppleOSVersion);
         } // if (AppleOSVersion)

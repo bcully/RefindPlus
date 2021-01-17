@@ -29,7 +29,7 @@
 #define BlockIoProtocol gEfiBlockIoProtocolGuid
 #endif
 
-GPT_DATA *gPartitions = NULL;
+extern GPT_DATA *gPartitions;
 
 // Allocate data for the main GPT_DATA structure, as well as the ProtectiveMBR
 // and Header structures it contains. This function does *NOT*, however,
@@ -118,7 +118,7 @@ EFI_STATUS ReadGptData(REFIT_VOLUME *Volume, GPT_DATA **Data) {
    EFI_STATUS Status = EFI_SUCCESS;
    UINT64     BufferSize;
    UINTN      i;
-   GPT_DATA   *GptData = NULL; // Temporary holding storage; transferred to *Data later
+   GPT_DATA   *GptData; // Temporary holding storage; transferred to *Data later
 
    if ((Volume == NULL) || (Data == NULL))
       return EFI_INVALID_PARAMETER;

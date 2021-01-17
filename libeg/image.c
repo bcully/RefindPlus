@@ -34,7 +34,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 /*
- * Modifications copyright (c) 2012-2020 Roderick W. Smith
+ * Modifications copyright (c) 2012-2015 Roderick W. Smith
  *
  * Modifications distributed under the terms of the GNU General Public
  * License (GPL) version 3 (GPLv3), or (at your option) any later version.
@@ -62,7 +62,6 @@
 #include "../refind/mystrings.h"
 #include "../include/refit_call_wrapper.h"
 #include "lodepng.h"
-#include "libeg.h"
 
 #define MAX_FILE_SIZE (1024*1024*1024)
 
@@ -280,12 +279,13 @@ EFI_STATUS egLoadFile(IN EFI_FILE *BaseDir, IN CHAR16 *FileName, OUT UINT8 **Fil
     return EFI_SUCCESS;
 }
 
+static EFI_GUID ESPGuid = { 0xc12a7328, 0xf81f, 0x11d2, { 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b } };
+
 EFI_STATUS egFindESP(OUT EFI_FILE_HANDLE *RootDir)
 {
     EFI_STATUS          Status;
     UINTN               HandleCount = 0;
     EFI_HANDLE          *Handles;
-    EFI_GUID            ESPGuid = ESP_GUID_VALUE;
 
     Status = LibLocateHandle(ByProtocol, &ESPGuid, NULL, &HandleCount, &Handles);
     if (!EFI_ERROR(Status) && HandleCount > 0) {
@@ -311,17 +311,14 @@ EFI_STATUS egSaveFile(IN EFI_FILE* BaseDir OPTIONAL, IN CHAR16 *FileName,
     }
 
     Status = refit_call5_wrapper(BaseDir->Open, BaseDir, &FileHandle, FileName,
-                                EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
+                                 EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE | EFI_FILE_MODE_CREATE, 0);
     if (EFI_ERROR(Status))
         return Status;
 
-    if (FileDataLength > 0) {
-        BufferSize = FileDataLength;
-        Status = refit_call3_wrapper(FileHandle->Write, FileHandle, &BufferSize, FileData);
-        refit_call1_wrapper(FileHandle->Close, FileHandle);
-    } else {
-        Status = refit_call1_wrapper(FileHandle->Delete, FileHandle);
-    } // if/else (FileDataLength > 0)
+    BufferSize = FileDataLength;
+    Status = refit_call3_wrapper(FileHandle->Write, FileHandle, &BufferSize, FileData);
+    refit_call1_wrapper(FileHandle->Close, FileHandle);
+
     return Status;
 }
 
@@ -339,8 +336,6 @@ static EG_IMAGE * egDecodeAny(IN UINT8 *FileData, IN UINTN FileDataLength, IN UI
    NewImage = egDecodeICNS(FileData, FileDataLength, IconSize, WantAlpha);
    if (NewImage == NULL)
       NewImage = egDecodePNG(FileData, FileDataLength, IconSize, WantAlpha);
-   if (NewImage == NULL)
-      NewImage = egDecodeJPEG(FileData, FileDataLength, IconSize, WantAlpha);
    if (NewImage == NULL)
       NewImage = egDecodeBMP(FileData, FileDataLength, IconSize, WantAlpha);
 
@@ -391,10 +386,8 @@ EG_IMAGE * egLoadIcon(IN EFI_FILE* BaseDir, IN CHAR16 *Path, IN UINTN IconSize)
     FreePool(FileData);
     if ((Image->Width != IconSize) || (Image->Height != IconSize)) {
        NewImage = egScaleImage(Image, IconSize, IconSize);
-       if (!NewImage) {
-          Print(L"Warning: Unable to scale icon from %d x %d to %d x %d from '%s'\n",
-                Image->Width, Image->Height, IconSize, IconSize, Path);
-       }
+       if (!NewImage)
+          Print(L"Warning: Unable to scale icon of the wrong size from '%s'\n", Path);
        egFreeImage(Image);
        Image = NewImage;
     }

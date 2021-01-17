@@ -34,7 +34,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 /*
- * Modifications copyright (c) 2012-2020 Roderick W. Smith
+ * Modifications copyright (c) 2012-2014 Roderick W. Smith
  *
  * Modifications distributed under the terms of the GNU General Public
  * License (GPL) version 3 (GPLv3), or (at your option) any later version.
@@ -177,7 +177,7 @@ BOOLEAN egSetScreenSize(IN OUT UINTN *ScreenWidth, IN OUT UINTN *ScreenHeight) {
    EFI_STATUS                            Status = EFI_SUCCESS;
    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION  *Info;
    UINTN                                 Size;
-   UINT32                                ModeNum = 0, CurrentModeNum;
+   UINT32                                ModeNum = 0;
    UINT32                                UGAWidth, UGAHeight, UGADepth, UGARefreshRate;
    BOOLEAN                               ModeSet = FALSE;
 
@@ -185,12 +185,9 @@ BOOLEAN egSetScreenSize(IN OUT UINTN *ScreenWidth, IN OUT UINTN *ScreenHeight) {
       return FALSE;
 
    if (GraphicsOutput != NULL) { // GOP mode (UEFI)
-      CurrentModeNum = GraphicsOutput->Mode->Mode;
       if (*ScreenHeight == 0) { // User specified a mode number (stored in *ScreenWidth); use it directly
          ModeNum = (UINT32) *ScreenWidth;
-         if (ModeNum != CurrentModeNum) {
-            ModeSet = TRUE;
-         } else if (egGetResFromMode(ScreenWidth, ScreenHeight) &&
+         if (egGetResFromMode(ScreenWidth, ScreenHeight) &&
              (refit_call2_wrapper(GraphicsOutput->SetMode, GraphicsOutput, ModeNum) == EFI_SUCCESS)) {
             ModeSet = TRUE;
          }
@@ -202,10 +199,9 @@ BOOLEAN egSetScreenSize(IN OUT UINTN *ScreenWidth, IN OUT UINTN *ScreenHeight) {
          do {
             Status = refit_call4_wrapper(GraphicsOutput->QueryMode, GraphicsOutput, ModeNum, &Size, &Info);
             if ((Status == EFI_SUCCESS) && (Size >= sizeof(*Info) && (Info != NULL)) &&
-                (Info->HorizontalResolution == *ScreenWidth) && (Info->VerticalResolution == *ScreenHeight) &&
-                ((ModeNum == CurrentModeNum) ||
-                 (refit_call2_wrapper(GraphicsOutput->SetMode, GraphicsOutput, ModeNum) == EFI_SUCCESS))) {
-               ModeSet = TRUE;
+                (Info->HorizontalResolution == *ScreenWidth) && (Info->VerticalResolution == *ScreenHeight)) {
+               Status = refit_call2_wrapper(GraphicsOutput->SetMode, GraphicsOutput, ModeNum);
+               ModeSet = (Status == EFI_SUCCESS);
             } // if
          } while ((++ModeNum < GraphicsOutput->Mode->MaxMode) && !ModeSet);
       } // if/else
@@ -221,10 +217,6 @@ BOOLEAN egSetScreenSize(IN OUT UINTN *ScreenWidth, IN OUT UINTN *ScreenHeight) {
             Status = refit_call4_wrapper(GraphicsOutput->QueryMode, GraphicsOutput, ModeNum, &Size, &Info);
             if ((Status == EFI_SUCCESS) && (Info != NULL)) {
                Print(L"Mode %d: %d x %d\n", ModeNum, Info->HorizontalResolution, Info->VerticalResolution);
-               if (ModeNum == CurrentModeNum) {
-                   egScreenWidth = Info->HorizontalResolution;
-                   egScreenHeight = Info->VerticalResolution;
-               } // if
             } // else
          } while (++ModeNum < GraphicsOutput->Mode->MaxMode);
          PauseForKey();
@@ -449,9 +441,8 @@ VOID egDrawImageArea(IN EG_IMAGE *Image,
 // Display a message in the center of the screen, surrounded by a box of the
 // specified color. For the moment, uses graphics calls only. (It still works
 // in text mode on GOP/UEFI systems, but not on UGA/EFI 1.x systems.)
-VOID egDisplayMessage(IN CHAR16 *Text, EG_PIXEL *BGColor, UINTN PositionCode) {
+VOID egDisplayMessage(IN CHAR16 *Text, EG_PIXEL *BGColor) {
    UINTN BoxWidth, BoxHeight;
-   static UINTN Position = 1;
    EG_IMAGE *Box;
 
    if ((Text != NULL) && (BGColor != NULL)) {
@@ -462,42 +453,20 @@ VOID egDisplayMessage(IN CHAR16 *Text, EG_PIXEL *BGColor, UINTN PositionCode) {
          BoxWidth = egScreenWidth;
       Box = egCreateFilledImage(BoxWidth, BoxHeight, FALSE, BGColor);
       egRenderText(Text, Box, 7, BoxHeight / 4, (BGColor->r + BGColor->g + BGColor->b) / 3);
-      switch (PositionCode) {
-          case CENTER:
-              Position = (egScreenHeight - BoxHeight) / 2;
-              break;
-          case BOTTOM:
-              Position = egScreenHeight - (BoxHeight * 2);
-              break;
-          case TOP:
-              Position = 1;
-              break;
-          default: // NEXTLINE
-              Position += BoxHeight + (BoxHeight / 10);
-              break;
-      } // switch()
-      egDrawImage(Box, (egScreenWidth - BoxWidth) / 2, Position);
-      if ((PositionCode == CENTER) || (Position >= egScreenHeight - (BoxHeight * 5)))
-          Position = 1;
+      egDrawImage(Box, (egScreenWidth - BoxWidth) / 2, (egScreenHeight - BoxHeight) / 2);
    } // if non-NULL inputs
 } // VOID egDisplayMessage()
 
 // Copy the current contents of the display into an EG_IMAGE....
 // Returns pointer if successful, NULL if not.
 EG_IMAGE * egCopyScreen(VOID) {
-   return egCopyScreenArea(0, 0, egScreenWidth, egScreenHeight);
-} // EG_IMAGE * egCopyScreen()
-
-// Copy the current contents of the specified display area into an EG_IMAGE....
-// Returns pointer if successful, NULL if not.
-EG_IMAGE * egCopyScreenArea(UINTN XPos, UINTN YPos, UINTN Width, UINTN Height) {
    EG_IMAGE *Image = NULL;
 
    if (!egHasGraphics)
       return NULL;
 
-   // allocate a buffer for the screen area
-   Image = egCreateImage(Width, Height, FALSE);
+   // allocate a buffer for the whole screen
+   Image = egCreateImage(egScreenWidth, egScreenHeight, FALSE);
    if (Image == NULL) {
       return NULL;
    }
@@ -505,13 +474,13 @@ EG_IMAGE * egCopyScreenArea(UINTN XPos, UINTN YPos, UINTN Width, UINTN Height) {
    // get full screen image
    if (GraphicsOutput != NULL) {
       refit_call10_wrapper(GraphicsOutput->Blt, GraphicsOutput, (EFI_GRAPHICS_OUTPUT_BLT_PIXEL *)Image->PixelData,
-                           EfiBltVideoToBltBuffer, XPos, YPos, 0, 0, Image->Width, Image->Height, 0);
+                           EfiBltVideoToBltBuffer, 0, 0, 0, 0, Image->Width, Image->Height, 0);
    } else if (UgaDraw != NULL) {
       refit_call10_wrapper(UgaDraw->Blt, UgaDraw, (EFI_UGA_PIXEL *)Image->PixelData, EfiUgaVideoToBltBuffer,
-                           XPos, YPos, 0, 0, Image->Width, Image->Height, 0);
+                           0, 0, 0, 0, Image->Width, Image->Height, 0);
    }
    return Image;
-} // EG_IMAGE * egCopyScreenArea()
+} // EG_IMAGE * egCopyScreen()
 
 //
 // Make a screenshot

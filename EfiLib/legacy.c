@@ -36,7 +36,6 @@ UINTN                    mBootOptionBbsMappingCount = 0;
 extern EFI_DEVICE_PATH EndDevicePath[];
 extern EFI_GUID gEfiLegacyBiosProtocolGuid;
 EFI_GUID gEfiLegacyDevOrderVariableGuid     = { 0xa56074db, 0x65fe, 0x45f7, {0xbd, 0x21, 0x2d, 0x2b, 0xdd, 0x8e, 0x96, 0x52 }};
-static EFI_GUID EfiGlobalVariableGuid = { 0x8BE4DF61, 0x93CA, 0x11D2, { 0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C }};
 
 /**
 
@@ -277,7 +276,7 @@ BdsFindLegacyBootOptionByDevTypeAndName (
     UnicodeSPrint (BootOption, sizeof (BootOption), L"Boot%04x", (UINTN) BootOrder[Index]);
     BootOptionVar = BdsLibGetVariableAndSize (
                       BootOption,
-                      &EfiGlobalVariableGuid,
+                      &gEfiGlobalVariableGuid,
                       &BootOptionSize
                       );
     if (NULL == BootOptionVar) {
@@ -463,7 +462,7 @@ BdsCreateLegacyBootOption (
 
   Status = refit_call5_wrapper(gRT->SetVariable,
                   BootString,
-                  &EfiGlobalVariableGuid,
+                  &gEfiGlobalVariableGuid,
                   VAR_FLAG,
                   BufferSize,
                   Buffer
@@ -748,7 +747,7 @@ BdsAddNonExistingLegacyBootOptions (
 
   BootOrder = BdsLibGetVariableAndSize (
                 L"BootOrder",
-                &EfiGlobalVariableGuid,
+                &gEfiGlobalVariableGuid,
                 &BootOrderSize
                 );
   if (BootOrder == NULL) {
@@ -818,13 +817,13 @@ BdsAddNonExistingLegacyBootOptions (
   if (BootOrderSize > 0) {
     Status = refit_call5_wrapper(gRT->SetVariable,
                     L"BootOrder",
-                    &EfiGlobalVariableGuid,
+                    &gEfiGlobalVariableGuid,
                     VAR_FLAG,
                     BootOrderSize,
                     BootOrder
                     );
   } else {
-    EfiLibDeleteVariable (L"BootOrder", &EfiGlobalVariableGuid);
+    EfiLibDeleteVariable (L"BootOrder", &gEfiGlobalVariableGuid);
   }
 
   if (BootOrder != NULL) {
@@ -862,7 +861,7 @@ BdsDeleteBootOption (
   Index2Del = 0;
 
   UnicodeSPrint (BootOption, sizeof (BootOption), L"Boot%04x", OptionNumber);
-  Status = EfiLibDeleteVariable (BootOption, &EfiGlobalVariableGuid);
+  Status = EfiLibDeleteVariable (BootOption, &gEfiGlobalVariableGuid);
 
   //
   // adjust boot order array
@@ -941,7 +940,7 @@ BdsDeleteAllInvalidLegacyBootOptions (
 
   BootOrder = BdsLibGetVariableAndSize (
                 L"BootOrder",
-                &EfiGlobalVariableGuid,
+                &gEfiGlobalVariableGuid,
                 &BootOrderSize
                 );
   if (BootOrder == NULL) {
@@ -953,14 +952,14 @@ BdsDeleteAllInvalidLegacyBootOptions (
     UnicodeSPrint (BootOption, sizeof (BootOption), L"Boot%04x", BootOrder[Index]);
     BootOptionVar = BdsLibGetVariableAndSize (
                       BootOption,
-                      &EfiGlobalVariableGuid,
+                      &gEfiGlobalVariableGuid,
                       &BootOptionSize
                       );
     if (NULL == BootOptionVar) {
       BootOptionSize = 0;
       Status = refit_call5_wrapper(gRT->GetVariable,
                       BootOption,
-                      &EfiGlobalVariableGuid,
+                      &gEfiGlobalVariableGuid,
                       NULL,
                       &BootOptionSize,
                       BootOptionVar
@@ -1036,13 +1035,13 @@ BdsDeleteAllInvalidLegacyBootOptions (
   if (BootOrderSize != 0) {
     Status = refit_call5_wrapper(gRT->SetVariable,
                     L"BootOrder",
-                    &EfiGlobalVariableGuid,
+                    &gEfiGlobalVariableGuid,
                     VAR_FLAG,
                     BootOrderSize,
                     BootOrder
                     );
   } else {
-    EfiLibDeleteVariable (L"BootOrder", &EfiGlobalVariableGuid);
+    EfiLibDeleteVariable (L"BootOrder", &gEfiGlobalVariableGuid);
   }
 
   if (BootOrder != NULL) {

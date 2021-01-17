@@ -34,7 +34,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 /*
- * Modifications copyright (c) 2012-2020 Roderick W. Smith
+ * Modifications copyright (c) 2012-2015 Roderick W. Smith
  *
  * Modifications distributed under the terms of the GNU General Public
  * License (GPL) version 3 (GPLv3), or (at your option) any later version.
@@ -61,7 +61,6 @@
 #include "libegint.h"
 #include "lib.h"
 #include "menu.h"
-#include "mystrings.h"
 #include "../include/refit_call_wrapper.h"
 
 #include "../include/egemb_refind_banner.h"
@@ -77,7 +76,6 @@ CHAR16 *BlankLine = NULL;
 UINTN UGAWidth;
 UINTN UGAHeight;
 BOOLEAN AllowGraphicsMode;
-BOOLEAN HaveResized = FALSE;
 
 EG_PIXEL StdBackgroundPixel  = { 0xbf, 0xbf, 0xbf, 0 };
 EG_PIXEL MenuBackgroundPixel = { 0xbf, 0xbf, 0xbf, 0 };
@@ -176,16 +174,10 @@ VOID SetupScreen(VOID)
         // switch to text mode if requested
         AllowGraphicsMode = FALSE;
         SwitchToText(FALSE);
+
     } else if (AllowGraphicsMode) {
         // clear screen and show banner
         // (now we know we'll stay in graphics mode)
-        if ((UGAWidth >= HIDPI_MIN) && !HaveResized) {
-            GlobalConfig.IconSizes[ICON_SIZE_BADGE] *= 2;
-            GlobalConfig.IconSizes[ICON_SIZE_SMALL] *= 2;
-            GlobalConfig.IconSizes[ICON_SIZE_BIG] *= 2;
-            GlobalConfig.IconSizes[ICON_SIZE_MOUSE] *= 2;
-            HaveResized = TRUE;
-        } // if
         SwitchToGraphics();
         if (GlobalConfig.ScreensaverTime != -1) {
            BltClearScreen(TRUE);
@@ -332,30 +324,11 @@ BOOLEAN ReadAllKeyStrokes(VOID)
     return GotKeyStrokes;
 }
 
-// Displays *text without regard to appearances. Used mainly for debugging
-// and rare error messages.
-// Position code is used only in graphics mode.
-// TODO: Improve to handle multi-line text.
-VOID PrintUglyText(IN CHAR16 *Text, IN UINTN PositionCode) {
-    EG_PIXEL BGColor = COLOR_RED;
-
-    if (Text) {
-        if (AllowGraphicsMode && MyStriCmp(L"Apple", ST->FirmwareVendor) && egIsGraphicsModeEnabled()) {
-            egDisplayMessage(Text, &BGColor, PositionCode);
-            GraphicsScreenDirty = TRUE;
-        } else { // non-Mac or in text mode; a Print() statement will work
-            Print(Text);
-            Print(L"\n");
-        } // if/else
-    } // if
-} // VOID PrintUglyText()
-
 VOID PauseForKey(VOID)
 {
     UINTN index;
 
-    Print(L"\n");
-    PrintUglyText(L"* Hit any key to continue *", BOTTOM);
+    Print(L"\n* Hit any key to continue *");
 
     if (ReadAllKeyStrokes()) {  // remove buffered key strokes
         refit_call1_wrapper(BS->Stall, 5000000);     // 5 seconds delay
@@ -364,6 +337,8 @@ VOID PauseForKey(VOID)
 
     refit_call3_wrapper(BS->WaitForEvent, 1, &ST->ConIn->WaitForKey, &index);
     ReadAllKeyStrokes();        // empty the buffer to protect the menu
+
+    Print(L"\n");
 }
 
 // Pause a specified number of seconds
@@ -397,51 +372,71 @@ VOID EndlessIdleLoop(VOID)
 // Error handling
 //
 
+#ifdef __MAKEWITH_GNUEFI
 BOOLEAN CheckFatalError(IN EFI_STATUS Status, IN CHAR16 *where)
 {
-    CHAR16 *Temp = NULL;
+    CHAR16 ErrorName[64];
 
     if (!EFI_ERROR(Status))
         return FALSE;
 
-#ifdef __MAKEWITH_GNUEFI
-    CHAR16 ErrorName[64];
     StatusToString(ErrorName, Status);
-    Temp = PoolPrint(L"Fatal Error: %s %s", ErrorName, where);
-#else
-    Temp = PoolPrint(L"Fatal Error: %s %s", Status, where);
-#endif
     refit_call2_wrapper(ST->ConOut->SetAttribute, ST->ConOut, ATTR_ERROR);
-    PrintUglyText(Temp, NEXTLINE);
+    Print(L"Fatal Error: %s %s\n", ErrorName, where);
     refit_call2_wrapper(ST->ConOut->SetAttribute, ST->ConOut, ATTR_BASIC);
     haveError = TRUE;
-    MyFreePool(Temp);
+
+    //BS->Exit(ImageHandle, ExitStatus, ExitDataSize, ExitData);
 
     return TRUE;
-} // BOOLEAN CheckFatalError()
+}
 
 BOOLEAN CheckError(IN EFI_STATUS Status, IN CHAR16 *where)
 {
-    CHAR16 *Temp = NULL;
+    CHAR16 ErrorName[64];
 
     if (!EFI_ERROR(Status))
         return FALSE;
 
-#ifdef __MAKEWITH_GNUEFI
-    CHAR16 ErrorName[64];
     StatusToString(ErrorName, Status);
-    Temp = PoolPrint(L"Error: %s %s", ErrorName, where);
-#else
-    Temp = PoolPrint(L"Error: %r %s", Status, where);
-#endif
     refit_call2_wrapper(ST->ConOut->SetAttribute, ST->ConOut, ATTR_ERROR);
-    PrintUglyText(Temp, NEXTLINE);
+    Print(L"Error: %s %s\n", ErrorName, where);
     refit_call2_wrapper(ST->ConOut->SetAttribute, ST->ConOut, ATTR_BASIC);
     haveError = TRUE;
-    MyFreePool(Temp);
 
     return TRUE;
-} // BOOLEAN CheckError()
+}
+#else
+BOOLEAN CheckFatalError(IN EFI_STATUS Status, IN CHAR16 *where)
+{
+//    CHAR16 ErrorName[64];
+
+    if (!EFI_ERROR(Status))
+        return FALSE;
+
+    gST->ConOut->SetAttribute (gST->ConOut, ATTR_ERROR);
+    Print(L"Fatal Error: %r %s\n", Status, where);
+    gST->ConOut->SetAttribute (gST->ConOut, ATTR_BASIC);
+    haveError = TRUE;
+
+    //gBS->Exit(ImageHandle, ExitStatus, ExitDataSize, ExitData);
+
+    return TRUE;
+}
+
+BOOLEAN CheckError(IN EFI_STATUS Status, IN CHAR16 *where)
+{
+    if (!EFI_ERROR(Status))
+        return FALSE;
+
+    gST->ConOut->SetAttribute (gST->ConOut, ATTR_ERROR);
+    Print(L"Error: %r %s\n", Status, where);
+    gST->ConOut->SetAttribute (gST->ConOut, ATTR_BASIC);
+    haveError = TRUE;
+
+    return TRUE;
+}
+#endif
 
 //
 // Graphics functions
@@ -480,7 +475,7 @@ VOID BltClearScreen(BOOLEAN ShowBanner)
                                       (Banner->Height > UGAHeight) ? UGAHeight : Banner->Height);
            } // if/elseif
            if (NewBanner) {
-              egFreeImage(Banner);
+              MyFreePool(Banner);
               Banner = NewBanner;
            }
            MenuBackgroundPixel = Banner->PixelData[0];
@@ -500,7 +495,6 @@ VOID BltClearScreen(BOOLEAN ShowBanner)
             GlobalConfig.BannerBottomEdge = BannerPosY + Banner->Height;
             if (GlobalConfig.ScreensaverTime != -1)
                BltImage(Banner, (UINTN) BannerPosX, (UINTN) BannerPosY);
-            egFreeImage(Banner);
         }
 
     } else { // not showing banner
@@ -561,11 +555,7 @@ VOID BltImageAlpha(IN EG_IMAGE *Image, IN UINTN XPos, IN UINTN YPos, IN EG_PIXEL
 //     GraphicsScreenDirty = TRUE;
 // }
 
-VOID BltImageCompositeBadge(IN EG_IMAGE *BaseImage,
-                            IN EG_IMAGE *TopImage,
-                            IN EG_IMAGE *BadgeImage,
-                            IN UINTN XPos,
-                            IN UINTN YPos)
+VOID BltImageCompositeBadge(IN EG_IMAGE *BaseImage, IN EG_IMAGE *TopImage, IN EG_IMAGE *BadgeImage, IN UINTN XPos, IN UINTN YPos)
 {
      UINTN TotalWidth = 0, TotalHeight = 0, CompWidth = 0, CompHeight = 0, OffsetX = 0, OffsetY = 0;
      EG_IMAGE *CompImage = NULL;
